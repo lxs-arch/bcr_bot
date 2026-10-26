@@ -454,6 +454,10 @@ python3 grounding.py --dry-run --box 300 200 380 300 --depth 2.0 \
 
 # A3：真检测器（可选依赖 torch/transformers/pillow + 权重）
 python3 grounding.py "红箱子" --detector dino --box-threshold 0.3 --navigate --standoff 0.8
+
+# A3 降级验收：没有权重也能在真机上验几何链（真实彩色图 + 真实深度 + 真实 TF）
+python3 grounding.py "红箱子" --detector stub \
+    --stub-box 300 200 380 300 --frame odom
 ```
 
 ### C.4 测试（本仓库的「先写测试再合并」约定）
@@ -499,6 +503,8 @@ python3 run_tests.py --standalone # 机器人机：完全不用 pytest
 | 节点一跑就 `ValueError: truth value of an array with more than one element is ambiguous` | `depth_patch` 里写了 `if not depth:`，真节点喂进来的是 ndarray | 判空改成 `len(depth) == 0`；补 `test_locate_object_accepts_numpy_depth` |
 | `--detector dino` 一检测就 `TypeError: 'int' object is not subscriptable` | `target_sizes=[image.size[::-1]]` 只对 PIL 成立，ndarray 的 `.size` 是整数 | 抽 `_image_hw()`：有 `shape` 用 `shape[:2]`，否则才用 `size[::-1]` |
 | 单元测试全绿、真机第一次跑就崩 | 测试里用假 PIL 图像，真节点传 ndarray，两条路径从没交汇 | `test_ros_glue.py` 用假 rclpy 把「消息 → 节点 → main()」整条链在离线跑通；CI 装 numpy |
+| 从 Mac 打包带过去的测试全绿，VM 上 `run_tests.py` 却报 `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa3` | macOS 的 `tar` 会把扩展属性写成 `._*` 伴生文件，这些文件也以 `.py` 结尾，被语法检查当源码读 | 打包用 `COPYFILE_DISABLE=1 tar czf …`，或在目标机 `rm -f */._*` |
+| VM 里 `git clone`/`curl https://github.com` 一律超时 | 机器只能连国内站点（百度/gitee 通，GitHub/CDN/各类 gh 代理都不通）；`gitclone.com` 对本仓库返回 504 | 在 Mac 上打包，用 `ssh -R` 隧道（localhost.run）起一个公网 URL，VM 里 `curl` 下载；或走共享文件夹 |
 | 节点起得来但 15s 后报「没收到相机图像/深度/内参」 | 相机用 best_effort 发布，`create_subscription` 默认 reliable，两者不兼容 | 订阅改用 `qos_profile_sensor_data`（默认），个别 reliable 相机加 `--qos reliable` |
 
 ---
