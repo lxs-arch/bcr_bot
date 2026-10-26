@@ -17,6 +17,9 @@
 | `eval_nav.py` | 导航批量评测：成功率 / 用时 / 终点误差 / recovery 次数 → CSV |
 | `semantic_map.py` | 语义地图读取（有 PyYAML 用 PyYAML，没有则内置极小解析器） |
 | `test_parse.py` | 解析层单测，23 条断言，**不需要 ROS 也不需要 pyyaml** |
+| `grounding.py` | A2 视觉接地：指令 → 检测框 → 深度反投影 → `map` 坐标 → 导航目标 |
+| `test_grounding.py` | 几何层单测，69 条断言，**不需要 ROS / GPU / 图像** |
+| `run_tests.py` | 统一测试入口：语法检查 + 逐个跑 `test_*.py` + 汇总 |
 
 ## 安装（在虚拟机里执行一次）
 
@@ -124,11 +127,65 @@ python3 eval_nav.py --runs 3 --goal 1.5 0.0 0.0 --csv ~/eval_1026.csv
 ## 跑测试
 
 ```bash
-python3 test_parse.py
+python3 run_tests.py          # 语法检查 + 全部单测，一条命令
+python3 test_parse.py         # 只测指令解析（23 条断言）
+python3 test_grounding.py     # 只测视觉接地的几何层（69 条断言）
+python3 test_grounding.py -v  # 逐条打印断言
 ```
 
-不需要 ROS、不需要 pyyaml（缺 pyyaml 时 `semantic_map.py` 自动用内置解析器）。
-输出 `ALL PASS` 即通过；改解析逻辑后先跑它，比在机器人上试错快得多。
+都不需要 ROS、不需要 pyyaml（缺 pyyaml 时 `semantic_map.py` 自动用内置解析器）。
+输出 `RESULT: PASS` 即通过；改解析/几何逻辑后先跑它，比在机器人上试错快得多。
+
+## A2：视觉接地（指令 → 画面里的物体 → map 坐标）
+
+A1 把「地名」映射成坐标，前提是**坐标你已经录过**。A2 解决另一半：
+指令里只说了物体的样子（"红箱子"），没说是哪个地名。
+
+```
+"红箱子"
+  → [检测器] bbox + score           ← 可换后端；默认 stub，真模型用 GroundingDINO
+  → [深度] bbox 内有效深度中位数     ← 纯函数（过滤 0/NaN/超距）
+  → [反投影] 像素 + 深度 + 内参 → 相机系 3D
+  → [外参] 相机系 → map（TF）
+  → [落点] 目标点沿视线退 standoff 米 → 导航目标
+```
+
+**先离线验证几何链**（不需要 ROS、不需要 GPU）：
+
+```bash
+python3 grounding.py --dry-run \
+    --box 300 200 380 300 --depth 2.0 \
+    --intrinsics 600 600 320 240 \
+    --camera-pose 1 2 0.3 0 --robot 0 0
+```
+
+输出四行，逐级可对数：
+
+```
+[BOX] center=(340.0, 250.0) depth=2.00m
+[CAM] point=(0.067, 0.033, 2.000)
+[MAP] object=(1.067, 2.033, 2.300)
+[GOAL] approach=(0.695, 1.325, yaw=1.088) standoff=0.80m
+```
+
+**在机器人上真跑**（需要相机 + 深度 + TF）：
+
+```bash
+# 只算坐标，不导航
+python3 grounding.py "红箱子"
+
+# 算完直接发 Nav2 目标，停在物体前 0.8 m
+python3 grounding.py "红箱子" --navigate --standoff 0.8
+
+# 换真模型（需 pip install torch transformers pillow；没 GPU 也能跑，就是慢）
+python3 grounding.py "红箱子" --detector dino --navigate
+```
+
+默认话题：`/bcr_bot/kinect_camera/color/image_raw`、`.../depth/image_raw`、
+`.../color/camera_info`，用 `--color-topic / --depth-topic / --info-topic` 改。
+
+> 为什么默认是 `stub`：检测模型要权重、要 GPU、启动几十秒。把几何链先测干净，
+> 模型出问题才能一眼分清是"没检出"还是"算错了"。
 
 ## 可选：接 LLM 处理更口语化的指令
 
@@ -156,6 +213,6 @@ python3 llm_nav.py "去那个堆放货物的地方"
 ## 下一步（阶段 A 的延伸）
 
 1. 给 `semantic_map.yaml` 补更多地点和别名，覆盖你常说的说法
-2. 加"相对方位"支持：`python3 llm_nav.py "走到起点左边两米"`
-3. 接 VLM：把相机图 + 指令一起喂模型，做「找红色箱子」这类视觉接地
-4. 失败回退：目标不可达时切到探索模式（Frontier exploration）
+2. 把 `--detector dino` 在真机上跑通，接上 `--navigate` 做完整闭环
+3. 失败回退：目标不可达时切到探索模式（Frontier exploration）
+4. A3：用采集的轨迹训一个小策略，替掉"规则解析 + costmap 规划"
