@@ -33,6 +33,12 @@ import sys
 import time
 from datetime import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from semantic_map import load_semantic_map as load_places  # noqa: E402
+except Exception:  # pragma: no cover
+    load_places = None
+
 try:  # ROS 依赖延迟导入:没有 ROS 也能 --help / 单测纯函数
     import rclpy
     from rclpy.action import ActionClient
@@ -49,119 +55,77 @@ def yaw_to_quat(yaw):
     return math.sin(yaw / 2.0), math.cos(yaw / 2.0)
 
 
-def _load_places_fallback(path):
-    """没有 pyyaml 时的极小解析器:只认 semantic_map.yaml 这一种结构。"""
-    places, current, frame = {}, None, 'map'
-    with open(path, encoding='utf-8') as f:
-        for raw in f:
-            line = raw.rstrip('\n')
-            if not line.strip() or line.lstrip().startswith('#'):
-                continue
-            if line.startswith('frame_id:'):
-                frame = line.split(':', 1)[1].strip().strip('"\'')
-                continue
-            if line.startswith('places:'):
-                continue
-            if line.startswith('  ') and not line.startswith('    '):
-                key = line.strip().rstrip(':')
-                current = key
-                places[key] = {}
-                continue
-            if current and line.startswith('    '):
-                k, _, v = line.strip().partition(':')
-                v = v.strip()
-                if k == 'aliases':
-                    v = [x.strip().strip('"\'') for x in v.strip('[]').split(',') if x.strip()]
-                    places[current][k] = v
-                elif k in ('x', 'y', 'yaw'):
-                    try:
-                        places[current][k] = float(v)
-                    except ValueError:
-                        pass
-    return places, frame
-
-
-def load_places(path):
-    try:
-        import yaml
-        with open(path, encoding='utf-8') as f:
-            data = yaml.safe_load(f) or {}
-        return data.get('places', {}), data.get('frame_id', 'map')
-    except ImportError:
-        return _load_places_fallback(path)
-
-
 if HAVE_ROS:
 
   class Evaluator(Node):
-      def __init__(self, frame):
-          super().__init__('eval_nav')
-          self.frame = frame
-          self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
-          self.recoveries = 0
-          # recovery 次数从行为树日志里数(取不到就退化为 0)
-          try:
-              from nav2_msgs.msg import BehaviorTreeLog
-              self.create_subscription(BehaviorTreeLog, 'behavior_tree_log', self._bt_cb, 10)
-              self._bt_ok = True
-          except Exception:
-              self._bt_ok = False
+        def __init__(self, frame):
+            super().__init__('eval_nav')
+            self.frame = frame
+            self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+            self.recoveries = 0
+            # recovery 次数从行为树日志里数(取不到就退化为 0)
+            try:
+                from nav2_msgs.msg import BehaviorTreeLog
+                self.create_subscription(BehaviorTreeLog, 'behavior_tree_log', self._bt_cb, 10)
+                self._bt_ok = True
+            except Exception:
+                self._bt_ok = False
 
-      def _bt_cb(self, msg):
-          for ev in msg.event_log:
-              name = getattr(ev, 'node_name', '') or ''
-              status = getattr(ev, 'current_status', '') or ''
-              if 'recovery' in name.lower() and 'SUCCESS' not in status.upper():
-                  self.recoveries += 1
+        def _bt_cb(self, msg):
+            for ev in msg.event_log:
+                name = getattr(ev, 'node_name', '') or ''
+                status = getattr(ev, 'current_status', '') or ''
+                if 'recovery' in name.lower() and 'SUCCESS' not in status.upper():
+                    self.recoveries += 1
 
-      def wait_server(self, timeout=60.0):
-          return self.client.wait_for_server(timeout_sec=timeout)
+        def wait_server(self, timeout=60.0):
+            return self.client.wait_for_server(timeout_sec=timeout)
 
-      def run_once(self, x, y, yaw, timeout=180.0):
-          """发一个目标并等待结束,返回 dict。"""
-          goal = NavigateToPose.Goal()
-          p = PoseStamped()
-          p.header.frame_id = self.frame
-          p.header.stamp = self.get_clock().now().to_msg()
-          p.pose.position.x = float(x)
-          p.pose.position.y = float(y)
-          qz, qw = yaw_to_quat(yaw)
-          p.pose.orientation.z = qz
-          p.pose.orientation.w = qw
-          goal.pose = p
+        def run_once(self, x, y, yaw, timeout=180.0):
+            """发一个目标并等待结束,返回 dict。"""
+            goal = NavigateToPose.Goal()
+            p = PoseStamped()
+            p.header.frame_id = self.frame
+            p.header.stamp = self.get_clock().now().to_msg()
+            p.pose.position.x = float(x)
+            p.pose.position.y = float(y)
+            qz, qw = yaw_to_quat(yaw)
+            p.pose.orientation.z = qz
+            p.pose.orientation.w = qw
+            goal.pose = p
 
-          self.recoveries = 0
-          best = {'dist': float('inf')}
+            self.recoveries = 0
+            best = {'dist': float('inf')}
 
-          def feedback_cb(fb):
-              d = getattr(fb.feedback, 'distance_remaining', None)
-              if d is not None and 0.0 <= d < best['dist']:
-                  best['dist'] = d
+            def feedback_cb(fb):
+                d = getattr(fb.feedback, 'distance_remaining', None)
+                if d is not None and 0.0 <= d < best['dist']:
+                    best['dist'] = d
 
-          t0 = time.time()
-          send = self.client.send_goal_async(goal, feedback_callback=feedback_cb)
-          rclpy.spin_until_future_complete(self, send, timeout_sec=30.0)
-          handle = send.result()
-          if handle is None or not handle.accepted:
-              return {'status': 'REJECTED', 'seconds': round(time.time() - t0, 2),
-                      'err': None, 'recoveries': 0, 'note': 'goal rejected'}
+            t0 = time.time()
+            send = self.client.send_goal_async(goal, feedback_callback=feedback_cb)
+            rclpy.spin_until_future_complete(self, send, timeout_sec=30.0)
+            handle = send.result()
+            if handle is None or not handle.accepted:
+                return {'status': 'REJECTED', 'seconds': round(time.time() - t0, 2),
+                        'err': None, 'recoveries': 0, 'note': 'goal rejected'}
 
-          res = handle.get_result_async()
-          deadline = time.time() + timeout
-          while not res.done() and time.time() < deadline:
-              rclpy.spin_once(self, timeout_sec=0.2)
-          seconds = round(time.time() - t0, 2)
+            res = handle.get_result_async()
+            deadline = time.time() + timeout
+            while not res.done() and time.time() < deadline:
+                rclpy.spin_once(self, timeout_sec=0.2)
+            seconds = round(time.time() - t0, 2)
 
-          if not res.done():
-              handle.cancel_goal_async()
-              return {'status': 'TIMEOUT', 'seconds': seconds, 'err': None,
-                      'recoveries': self.recoveries, 'note': f'>{timeout:.0f}s'}
+            if not res.done():
+                handle.cancel_goal_async()
+                return {'status': 'TIMEOUT', 'seconds': seconds, 'err': None,
+                        'recoveries': self.recoveries, 'note': f'>{timeout:.0f}s'}
 
-          code = res.result().status
-          status = {4: 'SUCCEEDED', 5: 'CANCELED', 6: 'ABORTED'}.get(code, f'CODE{code}')
-          return {'status': status, 'seconds': seconds,
-                  'err': None if best['dist'] == float('inf') else round(best['dist'], 3),
-                  'recoveries': self.recoveries, 'note': ''}
+            code = res.result().status
+            status = {4: 'SUCCEEDED', 5: 'CANCELED', 6: 'ABORTED'}.get(code, f'CODE{code}')
+            return {'status': status, 'seconds': seconds,
+                    'err': None if best['dist'] == float('inf') else round(best['dist'], 3),
+                    'recoveries': self.recoveries, 'note': ''}
 
 
 def summarize(rows):
@@ -191,8 +155,11 @@ def main():
     targets = []
     if args.goal:
         targets += [(x, y, yaw, '(%.2f,%.2f)' % (x, y)) for x, y, yaw in args.goal]
+    if (args.map or args.place) and load_places is None:
+        sys.exit('找不到 semantic_map.py（需与 eval_nav.py 同目录）')
+
     if args.map and args.place:
-        places, frame = load_places(args.map)
+        frame, places = load_places(args.map)
         for name in args.place:
             if name not in places:
                 sys.exit(f'语义地图里没有地名: {name}(现有: {", ".join(places)})')
@@ -204,7 +171,7 @@ def main():
     frame = 'map'
     if args.map:
         try:
-            _, frame = load_places(args.map)
+            frame, _ = load_places(args.map)
         except SystemExit:
             pass
 
