@@ -15,7 +15,8 @@
 | SLAM 建图（slam_toolbox） | ✅ | 覆盖约 5 m × 5 m，墙线闭合 |
 | 地图保存（pgm + yaml） | ✅ | `maps/bcr2.*`、`maps/bcr3.*` |
 | Nav2 定位 + 自主导航 | ✅ | `Reached the goal!` / `Goal succeeded`，状态码 4（SUCCEEDED） |
-| 语言 → 导航（阶段 A） | 🟡 | `vla_nav/llm_nav.py` 脚本已就绪，待按自己的地图补地名 |
+| 语言 → 导航（阶段 A，A0–A2） | ✅ | `vla_nav/llm_nav.py` 解析发目标；几何链见附录 C |
+| 视觉接地（阶段 A，A3） | 🟡 | 检测器适配 + 离线测试完成；**真机 GPU 推理待验证**（附录 C） |
 | 全程自动建图 | ⚠️ | 反应式漫游会因扫描匹配漂移产生拖影，建议用里程计闭环的固定路线 |
 
 ---
@@ -409,21 +410,88 @@ cmd.angular.z = 0.35
 
 推荐参数：`linear.x = 0.15 m/s`、`angular.z = 0.35 rad/s`、每段后停 1 s 让扫描匹配收敛。
 
-## 附录 C：语言 → 导航（阶段 A）
+## 附录 C：阶段 A 里程碑（A0–A3）—— 语言 → 导航 → 视觉接地
 
-见同仓库 `vla_nav/`：
+代码在 `vla_nav/`，全部**离线可测**（不需要 ROS / GPU / 相机）。
+
+### C.1 里程碑与状态
+
+| 里程碑 | 内容 | 状态 | 验证方式 |
+|---|---|---|---|
+| A0 | 语义地图 + 录点 + 发目标的基础设施（`semantic_map.py`/`record_place.py`） | ✅ | `llm_nav.py --list`、RViz 点选写入 |
+| A1 | 指令解析：相对方位（前后左右）/ 绝对方位（罗盘）/ 多步指令 | ✅ | `test_parse.py` 表驱动用例 |
+| A2 | 视觉接地几何链：检测框 → 深度中位数 → 反投影 → TF → `map` 落点 | ✅ | `test_grounding.py` + `test_pipeline.py` |
+| A3 | 真检测器适配（GroundingDINO）+ 可选依赖降级 + 统一 pytest 套件 + CI | ✅（代码/离线测试） | `test_detector.py`；**真机 GPU 推理尚未在本仓库验证** |
+
+> 诚实边界：A3 只把「检测器接口 + 适配层 + 依赖缺失时的可执行提示」做完并测了；
+> HuggingFace 权重下载、GPU 上的实际延迟、真实 Kinect 深度噪声下的落点精度，
+> 都还需要一台带 GPU 的机器跑一次才能填数（见 C.5 指标表）。
+
+### C.2 文件清单
 
 | 文件 | 作用 |
 |---|---|
-| `semantic_map.yaml` | 地名 → `(x, y, yaw)` |
+| `semantic_map.yaml` | 地名 → `(x, y, yaw)`，按自己的地图改 |
 | `llm_nav.py` | 指令解析（规则 → aliases → LLM 三层兜底）+ 发 Nav2 目标 |
 | `record_place.py` | RViz `Publish Point` 点一下自动写入 yaml |
+| `eval_nav.py` | 批量导航评测：成功率 / 用时 / 终点误差 / recovery 次数 → CSV |
+| `grounding.py` | 视觉接地：`locate_object()` 纯函数主干 + `stub` / `dino` 两种检测器后端 |
+| `test_parse.py` / `test_grounding.py` / `test_pipeline.py` / `test_detector.py` | 四层测试 |
+| `_testkit.py` / `conftest.py` / `pytest.ini` / `run_tests.py` | 测试脚手架：pytest 与 standalone 双跑 |
+
+### C.3 命令
 
 ```bash
-python3 llm_nav.py --list          # 检查地图
-python3 record_place.py            # 录地名
-python3 llm_nav.py "去A区"          # 语言导航
+# A1：地名 / 相对方位 / 多步
+python3 llm_nav.py --list
+python3 record_place.py
+python3 llm_nav.py "去A区"
+python3 llm_nav.py --dry-run "A区左边1米"      # 只解析，不发目标（离线）
+
+# A2：只算几何，不需要 ROS
+python3 grounding.py --dry-run --box 300 200 380 300 --depth 2.0 \
+    --intrinsics 600 600 320 240 --camera-pose 1 2 0.3 0 --robot 0 0
+
+# A3：真检测器（可选依赖 torch/transformers/pillow + 权重）
+python3 grounding.py "红箱子" --detector dino --box-threshold 0.3 --navigate --standoff 0.8
 ```
+
+### C.4 测试（本仓库的「先写测试再合并」约定）
+
+```bash
+cd vla_nav
+python3 run_tests.py              # 自动选 runner：有 pytest 用 pytest，没装逐文件跑
+python3 run_tests.py --pytest     # CI 用：强制 pytest
+python3 run_tests.py --standalone # 机器人机：完全不用 pytest
+```
+
+- 覆盖解析 / 语义词典 / 几何投影 / 落点策略 / 检测器契约 / 依赖降级；
+- CI：`.github/workflows/vla_nav-tests.yml`（push / PR 触发，`ubuntu-latest` + `pip install pytest pyyaml`）；
+- numpy 只在装了的时候多测一条互操作用例；pyyaml 缺失时走内置解析器。
+
+### C.5 阶段 A 指标表模板
+
+每次「一句话 → 到达」的 episode 填一行，用来判断失败到底出在解析、接地还是导航：
+
+| 指令 | 类型 | 检出 | 一次成功 | 重试 | 用时(s) | 终点误差(m) | 失败环节 | 备注 |
+|---|---|---|---|---|---|---|---|---|
+| `去A区` | 地名 | n/a | ✅ | 0 | 12.4 | 0.08 | — | 基线 |
+| `A区左边1米` | 相对方位 | n/a | ✅ | 0 | 13.1 | 0.11 | — | yaw 决定"左" |
+| `红箱子` | 视觉接地(stub) | ✅ | — | — | — | — | — | 只验证链路 |
+| `红箱子` | 视觉接地(dino) | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | **待 GPU 机器填** |
+
+失败环节分类建议：`parse`（没认出）/ `detect`（没检出/误检）/ `depth`（深度缺失）/
+`tf`（相机外参查不到）/ `nav`（目标被拒或超时）。
+
+### C.6 阶段 A 踩坑补记
+
+| 现象 | 原因 | 修法 |
+|---|---|---|
+| `grounding.py` 一启动就 ImportError 栈 | torch/transformers 是可选依赖 | 构造前先 `missing_deps()`，直接给 `pip3 install …` 提示；联调用 `--detector stub` |
+| 算出的点"贴着车头" | 深度图里 0 被当成 0 m 参与平均 | `median_depth` 过滤 0 / NaN / inf / 超距，取中位数 |
+| 物体在画面里但坐标乱飞 | 只用 yaw 近似相机外参，把光学系的"下"当成了 map 的 +y | TF 必须带完整四元数；`test_pipeline.py::test_optical_rotation_maps_height` 钉住这一点 |
+| 目标点撞在物体上 | 直接把物体坐标当导航目标 | 沿「机器人→物体」连线退 `--standoff` 米 |
+| CPU 上 dino 每帧好几秒 | GroundingDINO 是 ViT 检测器 | 停车再检测、`--standoff` 留余量、只在需要时触发 |
 
 ---
 

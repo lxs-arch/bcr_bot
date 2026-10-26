@@ -14,9 +14,12 @@
 
 * 几何计算**不依赖 numpy / ROS / 第三方库**，因此可以离线单测；
   只有真正读图（sensor_msgs/Image 解码）才用 numpy，并且延迟导入。
+* 整条链路被压成一个纯函数 `locate_object(...)`：检测结果 + 深度数组 + 内参 +
+  相机→map 外参 → map 坐标与导航落点。ROS 节点只做「解码 + 查 TF」。
 * 检测器是一个「后端接口」。默认 `StubDetector` 用于测试与联调；
   真模型（GroundingDINO / OWLv2）在 `GroundingDinoDetector` 里延迟导入，
-  没装依赖时给出可执行的提示而不是 ImportError 堆栈。
+  **torch / transformers / 权重都是可选依赖**：没装时 `missing_deps()` 能提前报出来，
+  构造时给出可执行的 pip 提示而不是 ImportError 堆栈，CI 与无 GPU 机器照常跑单测。
 
 用法:
 
@@ -24,8 +27,9 @@
     python3 grounding.py --dry-run --box 300 200 380 300 --depth 2.0 \\
         --intrinsics 600 600 320 240 --camera-pose 1.0 2.0 0.3 0.0
 
-    # 真机：检测 + 直接导航过去
-    python3 grounding.py "红箱子" --navigate --standoff 0.8
+    # 真机：stub 先联调链路，再换真模型 + 直接导航过去
+    python3 grounding.py "红箱子" --detector stub
+    python3 grounding.py "红箱子" --detector dino --navigate --standoff 0.8
 """
 
 import argparse
@@ -133,6 +137,28 @@ def median_depth(values, min_depth=0.10, max_depth=8.0):
     return good[mid] if n % 2 else 0.5 * (good[mid - 1] + good[mid])
 
 
+def depth_patch(depth, box, pad=0):
+    """取 bbox 内的一维深度序列（行优先），越界自动夹到图像范围内。
+
+    `depth` 既可以是「行列表」(`list[list[float]]`)，也可以是 numpy 二维数组——
+    两者都支持 `depth[y1:y2]` 与 `row[x1:x2]` 切片，所以这里不必 import numpy。
+    空图像 / 完全越界返回 []，交给 `median_depth` 判空。
+    """
+    if not depth:
+        return []
+    h = len(depth)
+    w = len(depth[0]) if h else 0
+    x1, y1, x2, y2 = [int(round(v)) for v in box]
+    x1, x2 = max(0, min(x1, x2) - pad), min(w, max(x1, x2) + 1 + pad)
+    y1, y2 = max(0, min(y1, y2) - pad), min(h, max(y1, y2) + 1 + pad)
+    if x2 <= x1 or y2 <= y1:
+        return []
+    out = []
+    for row in depth[y1:y2]:
+        out.extend(row[x1:x2])
+    return out
+
+
 def box_center(box):
     x1, y1, x2, y2 = box
     return (x1 + x2) / 2.0, (y1 + y2) / 2.0
@@ -184,6 +210,40 @@ def yaw_towards(from_xy, to_xy):
     return math.atan2(to_xy[1] - from_xy[1], to_xy[0] - from_xy[0])
 
 
+# ---------------------------------------------------------------- 整条管线（纯函数）
+def locate_object(depth, k, detections, tf4, robot_xy, standoff=0.8,
+                  min_score=0.3, min_area=64.0, min_depth=0.10, max_depth=8.0):
+    """检测结果 + 深度 + 内参 + 相机→map 外参 → 物体 map 坐标与导航落点。
+
+    这是 A2/A3 的核心链路，**完全纯函数**：不触碰 ROS、不读 topic、不需要 numpy。
+    单元测试可以直接喂「手写的深度二维数组 + Detection 列表 + 4x4」，
+    真机路径 (`GroundingNode.locate`) 只是把 sensor_msgs 解码成同样形状再调它。
+
+    返回 dict（含 `x/y/yaw` 兼容字段），任一环节没数据则返回 None：
+
+        {'object': (x, y, z),   # 物体在 map 下的 3D 位置
+         'goal':   (x, y, yaw), # 机器人该去的落点（离物体 standoff 米）
+         'x': ..., 'y': ..., 'yaw': ...,
+         'score': ..., 'depth': ..., 'box': (x1, y1, x2, y2)}
+    """
+    best = pick_best(detections, min_score=min_score, min_area=min_area)
+    if best is None:
+        return None
+    z = median_depth(depth_patch(depth, best.box),
+                     min_depth=min_depth, max_depth=max_depth)
+    if z is None:
+        return None
+    u, v = box_center(best.box)
+    p_cam = backproject(u, v, z, k)
+    p_map = transform_point(tf4, p_cam)
+    goal = standoff_point((p_map[0], p_map[1]), tuple(robot_xy), standoff)
+    yaw = yaw_towards(tuple(robot_xy), (p_map[0], p_map[1]))
+    return {'object': (p_map[0], p_map[1], p_map[2]),
+            'goal': (goal[0], goal[1], yaw),
+            'x': goal[0], 'y': goal[1], 'yaw': yaw,
+            'score': best.score, 'depth': z, 'box': best.box}
+
+
 # ---------------------------------------------------------------- 检测器后端
 class Detection(object):
     __slots__ = ('box', 'score', 'label')
@@ -209,7 +269,7 @@ class StubDetector(object):
 
 
 class GroundingDinoDetector(object):
-    """真模型后端（可选）。依赖 torch + transformers，未装则明确报错。
+    """真模型后端（可选依赖）。torch + transformers 没装 / 权重没下时给出可执行提示。
 
     调用示例::
 
@@ -217,23 +277,48 @@ class GroundingDinoDetector(object):
         dets = det.detect(pil_image, '红箱子')
 
     设备选择: torch.cuda.is_available() 有就用 cuda，否则 cpu（会很慢，仅演示）。
+    权重来源: 默认从 HuggingFace 拉；离线机器先 `huggingface-cli download` 再把
+    `HF_HOME` 指到本地缓存目录，或直接把本地权重路径当 `model_id` 传进来。
     """
+
+    REQUIREMENTS = ('torch', 'transformers')
 
     def __init__(self, model_id='IDEA-Research/grounding-dino-tiny',
                  box_threshold=0.3, text_threshold=0.25, device=None):
-        try:
-            import torch
-            from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-        except ImportError as exc:
+        missing = self.missing_deps()
+        if missing:
             raise SystemExit(
-                '缺少依赖：%s\n装装看：pip3 install torch transformers pillow\n'
-                '（没有 GPU 也能跑，就是慢；想快就用 --detector stub 先联调几何链）' % exc)
+                '缺少可选依赖：%s\n'
+                '装装看：pip3 install %s pillow\n'
+                '（没有 GPU 也能跑，就是慢；先用 --detector stub 联调几何链）' % (
+                    ', '.join(missing), ' '.join(missing)))
+        import torch
+        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
         self._torch = torch
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        try:
+            self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        except Exception:                              # noqa: BLE001  某些装了 CPU 版但驱动坏的情况
+            self.device = 'cpu'
+        self.model_id = model_id
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(self.device)
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
+
+    @classmethod
+    def missing_deps(cls):
+        """返回缺失的可选依赖名列表；空列表表示可以加载真模型。
+
+        用 `__import__` 而不是 `find_spec`，这样 sys.modules 里被置 None
+        （测试里模拟"没装"）也能正确判定。
+        """
+        missing = []
+        for mod in cls.REQUIREMENTS:
+            try:
+                __import__(mod)
+            except ImportError:
+                missing.append(mod)
+        return missing
 
     def detect(self, image, prompt):
         text = prompt if prompt.strip().endswith('.') else prompt.strip() + '.'
@@ -254,10 +339,13 @@ class GroundingDinoDetector(object):
 
 
 def make_detector(name, **kw):
+    """按名字建检测器。未知后端 / 缺依赖都给出可读错误（SystemExit）。"""
     if name == 'stub':
         return StubDetector(kw.get('detections'))
     if name in ('dino', 'groundingdino'):
-        return GroundingDinoDetector(**{k: v for k, v in kw.items() if k != 'detections'})
+        allowed = ('model_id', 'box_threshold', 'text_threshold', 'device')
+        return GroundingDinoDetector(**{k: v for k, v in kw.items()
+                                        if k in allowed and v is not None})
     raise SystemExit('未知检测器后端: %s（可选 stub / dino）' % name)
 
 
@@ -325,32 +413,24 @@ if HAVE_ROS:
             return self.k is not None and self.color is not None and self.depth is not None
 
         def locate(self, detector, prompt, robot_xy):
-            """返回 dict(x, y, yaw, score, depth)，失败返回 None。"""
+            """读一帧 → 调检测器 → 交给纯函数 locate_object；失败返回 None。
+
+            ROS 部分只负责「把消息变成数组 + 查一次 TF」，几何全部在
+            `locate_object` 里，因此同样的链路可以离线单测。
+            """
             if not self.ready():
                 return None
             img = _image_to_array(self.color)
             dep = _image_to_array(self.depth)
             dets = detector.detect(img, prompt)
-            best = pick_best(dets)
-            if best is None:
+            if not dets:
                 return None
-            u, v = box_center(best.box)
-            x1, y1, x2, y2 = [int(round(t)) for t in best.box]
-            patch = dep[max(0, y1):y2, max(0, x1):x2].flatten().tolist()
-            z = median_depth(patch)
-            if z is None:
-                return None
-            p_cam = backproject(u, v, z, self.k)
             tf_msg = self.tf.lookup_transform(self.target_frame, self.color.header.frame_id,
                                               rclpy.time.Time())
             t = tf_msg.transform.translation
             q = tf_msg.transform.rotation
             tf4 = pose_to_matrix(t.x, t.y, t.z, q.x, q.y, q.z, q.w)
-            p_map = transform_point(tf4, p_cam)
-            goal = standoff_point((p_map[0], p_map[1]), robot_xy, self.standoff)
-            return {'x': goal[0], 'y': goal[1],
-                    'yaw': yaw_towards(tuple(robot_xy), (p_map[0], p_map[1])),
-                    'score': best.score, 'depth': z}
+            return locate_object(dep, self.k, dets, tf4, robot_xy, self.standoff)
 
 
 # ---------------------------------------------------------------- CLI
@@ -358,6 +438,11 @@ def _parse_args(argv):
     ap = argparse.ArgumentParser(description='视觉接地：指令 → map 坐标')
     ap.add_argument('prompt', nargs='*', help='要寻找的目标，例如 "红箱子"')
     ap.add_argument('--detector', default='stub', choices=['stub', 'dino'])
+    ap.add_argument('--model-id', default='IDEA-Research/grounding-dino-tiny',
+                    help='dino 权重（HF id 或本地路径）；离线机器把 HF_HOME 指到缓存目录')
+    ap.add_argument('--box-threshold', type=float, default=0.3, help='dino 框阈值')
+    ap.add_argument('--text-threshold', type=float, default=0.25, help='dino 文本阈值')
+    ap.add_argument('--device', default=None, help='dino 设备：cuda / cpu（默认自动）')
     ap.add_argument('--color-topic', default='/bcr_bot/kinect_camera/color/image_raw')
     ap.add_argument('--depth-topic', default='/bcr_bot/kinect_camera/depth/image_raw')
     ap.add_argument('--info-topic', default='/bcr_bot/kinect_camera/color/camera_info')
@@ -407,10 +492,16 @@ def main(argv=None):
         print('[ERR] 需要给出要寻找的目标，例如: python3 grounding.py "红箱子"')
         return 2
 
+    # 先把检测器建起来：可选依赖缺失时立刻给出可执行提示，别等 ROS 起来才报错。
+    det = make_detector(args.detector,
+                        model_id=args.model_id,
+                        box_threshold=args.box_threshold,
+                        text_threshold=args.text_threshold,
+                        device=args.device)
+
     rclpy.init()
     node = GroundingNode(args.color_topic, args.depth_topic, args.info_topic,
                          standoff=args.standoff)
-    det = make_detector(args.detector)
     try:
         import time
         t0 = time.time()
@@ -423,8 +514,11 @@ def main(argv=None):
         if res is None:
             print('[MISS] 没找到 %r（降低阈值或换说法再试）' % prompt)
             return 4
-        print('[FOUND] %r score=%.3f depth=%.2fm -> goal=(%.2f, %.2f, yaw=%.2f)' % (
-            prompt, res['score'], res['depth'], res['x'], res['y'], res['yaw']))
+        obj = res['object']
+        print('[FOUND] %r score=%.3f depth=%.2fm object=(%.2f, %.2f, %.2f) '
+              '-> goal=(%.2f, %.2f, yaw=%.2f)' % (
+                  prompt, res['score'], res['depth'], obj[0], obj[1], obj[2],
+                  res['x'], res['y'], res['yaw']))
         if args.navigate:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import llm_nav
