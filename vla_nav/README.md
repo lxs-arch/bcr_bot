@@ -211,8 +211,19 @@ python3 grounding.py "红箱子" --navigate --standoff 0.8
 python3 grounding.py "红箱子" --detector dino --navigate
 ```
 
-默认话题：`/bcr_bot/kinect_camera/color/image_raw`、`.../depth/image_raw`、
-`.../color/camera_info`，用 `--color-topic / --depth-topic / --info-topic` 改。
+默认话题对着 **MuJoCo 仿真**（真机实测过）：`/kinect_camera_sensor/color`、
+`/kinect_camera_sensor/depth`、`/kinect_camera_sensor/camera_info`。
+Gazebo 分支用的是另一套，用参数覆盖：
+
+```bash
+# Gazebo（Harmonic/Fortress）那套话题名
+--color-topic /bcr_bot/kinect_camera/color/image_raw \
+--depth-topic /bcr_bot/kinect_camera/depth/image_raw \
+--info-topic  /bcr_bot/kinect_camera/color/camera_info
+```
+
+先 `ros2 topic list | grep -iE "image|camera"` 确认；MuJoCo 里还有
+`/bcr_bot/stereo_camera/{left,right}/{image_raw,depth,camera_info}` 可用。
 
 订阅默认用 **sensor data QoS（best_effort）**：相机/深度图基本都用 best_effort 发布，
 用默认的 reliable 订阅与发布方不兼容，症状是「一帧都收不到、15 秒后超时退出码 3」。
@@ -230,6 +241,13 @@ python3 grounding.py "红箱子" --detector dino --navigate
 # 仿真里已经有相机话题、但没起 SLAM 时，验"深度 → 相机系 → odom 落点"
 python3 grounding.py "红箱子" --detector stub \
     --stub-box 300 200 380 300 --frame odom
+```
+
+在真机（Jazzy + MuJoCo `bcr_bot_small_warehouse`）上跑通的输出：
+
+```
+[INFO] [grounding]: grounding 就绪: color=/kinect_camera_sensor/color … qos=sensor
+[FOUND] 'red_box' score=0.900 depth=6.45m object=(6.90, -0.23, 0.11) -> goal=(6.10, -0.21, yaw=-0.03)
 ```
 
 ## A3：接真检测器（GroundingDINO）

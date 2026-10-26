@@ -289,5 +289,18 @@ def test_stub_detector_from_box():
     assert found.label == '红箱子', found.label
 
 
+def test_default_topics_match_mujoco_sim():
+    """默认话题要能直接对着 `ros2 launch bcr_bot mujoco.launch.py` 跑。
+
+    真机实测：MuJoCo 仿真发布的是 /kinect_camera_sensor/{color,depth,camera_info}，
+    而 Gazebo 分支用的是 /bcr_bot/kinect_camera/color/image_raw 那一套。
+    默认值给 MuJoCo（当前主线验证路径），Gazebo 用 --color-topic 等显式覆盖。
+    """
+    args = G._parse_args(['红箱子'])
+    assert args.color_topic == '/kinect_camera_sensor/color', args.color_topic
+    assert args.depth_topic == '/kinect_camera_sensor/depth', args.depth_topic
+    assert args.info_topic == '/kinect_camera_sensor/camera_info', args.info_topic
+
+
 if __name__ == '__main__':
     sys.exit(_testkit.run(globals()))

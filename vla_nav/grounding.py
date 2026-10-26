@@ -478,9 +478,12 @@ def _parse_args(argv):
     ap.add_argument('--stub-box', nargs=4, type=float, metavar=('X1', 'Y1', 'X2', 'Y2'),
                     help='配合 --detector stub：注入一个像素检测框，真机上验证几何链用')
     ap.add_argument('--stub-score', type=float, default=0.9, help='--stub-box 的分数')
-    ap.add_argument('--color-topic', default='/bcr_bot/kinect_camera/color/image_raw')
-    ap.add_argument('--depth-topic', default='/bcr_bot/kinect_camera/depth/image_raw')
-    ap.add_argument('--info-topic', default='/bcr_bot/kinect_camera/color/camera_info')
+    ap.add_argument('--color-topic', default='/kinect_camera_sensor/color',
+                    help='MuJoCo 仿真默认；Gazebo 用 /bcr_bot/kinect_camera/color/image_raw')
+    ap.add_argument('--depth-topic', default='/kinect_camera_sensor/depth',
+                    help='MuJoCo 仿真默认；Gazebo 用 /bcr_bot/kinect_camera/depth/image_raw')
+    ap.add_argument('--info-topic', default='/kinect_camera_sensor/camera_info',
+                    help='MuJoCo 仿真默认；Gazebo 用 .../color/camera_info')
     ap.add_argument('--standoff', type=float, default=0.8, help='距目标保持多少米')
     ap.add_argument('--frame', default='map',
                     help='目标坐标系，默认 map；没有建图时可用 odom/odom→map 之外的上级帧')
