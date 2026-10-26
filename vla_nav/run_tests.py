@@ -122,6 +122,10 @@ def main():
 
     print('=' * 66)
     print('vla_nav 统一测试  dir=%s' % HERE)
+    if importlib.util.find_spec('numpy') is None:
+        # 没有 numpy 时 ndarray 相关用例会打印 SKIP 并返回——全绿是"假绿"，
+        # 历史上正是这样漏掉了两个真机必崩的 bug。
+        print('  [WARN] 当前解释器没装 numpy：ndarray 相关用例会 SKIP（pip3 install numpy）')
     print('runner=%s  python=%s' % ('pytest' if use_pytest else 'standalone',
                                     sys.version.split()[0]))
     print('=' * 66)

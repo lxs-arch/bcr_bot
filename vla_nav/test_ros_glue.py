@@ -273,9 +273,11 @@ def needs_numpy(fn):
 
 
 # ---------------------------------------------------------- 默认 topic（与 CLI 一致）
-COLOR_T = '/bcr_bot/kinect_camera/color/image_raw'
-DEPTH_T = '/bcr_bot/kinect_camera/depth/image_raw'
-INFO_T = '/bcr_bot/kinect_camera/color/camera_info'
+# 必须等于 grounding.py 的 CLI 默认值：假世界按 topic 名投递，若这里和默认值漂了，
+# main() 用例不会报错，只会安静地等满 15s 再超时（真机上就是这么踩的）。
+COLOR_T = '/kinect_camera_sensor/color'
+DEPTH_T = '/kinect_camera_sensor/depth'
+INFO_T = '/kinect_camera_sensor/camera_info'
 
 
 def make_node(mod, standoff=0.8):
@@ -296,6 +298,20 @@ def queue_for_main(world, mod):
     world.spin_scripts = [(INFO_T, FakeCameraInfo()),
                           (COLOR_T, color_image()),
                           (DEPTH_T, depth_image(dtype='uint16'))]
+
+
+def test_fake_world_topics_match_cli_defaults():
+    """防漂移：假世界投递的话题名必须和 CLI 默认值完全一致。
+
+    MuJoCo 是 /kinect_camera_sensor/*，Gazebo 是 /bcr_bot/kinect_camera/*。
+    只要两边不一致，main() 的用例就会 15s 超时（而不是断言失败），很难看出根因。
+    """
+    args = G._parse_args(['红箱子'])
+    assert (COLOR_T, DEPTH_T, INFO_T) == (
+        args.color_topic, args.depth_topic, args.info_topic), \
+        '假世界话题 %r != CLI 默认 %r' % (
+            (COLOR_T, DEPTH_T, INFO_T),
+            (args.color_topic, args.depth_topic, args.info_topic))
 
 
 # ------------------------------------------------------- _image_to_array / 内参
