@@ -1,0 +1,35 @@
+# 语义地图：把"人话里的地点"映射到 map 坐标系下的位姿
+# 用法：
+#   1) RViz 工具栏点 "Publish Point"，在地图上点一下
+#   2) 运行 record_place.py 会把那个点写进本文件
+#   3) llm_nav.py 读本文件，把"去A区"翻译成导航目标
+#
+# x, y 单位 m；yaw 单位 rad（0 = +x 方向，1.5708 = +y 方向）
+# aliases 用于规则匹配（不需要 LLM 也能命中）
+
+frame_id: map
+
+places:
+  起点:
+    x: 0.0
+    y: 0.0
+    yaw: 0.0
+    aliases: [原点, 出发, 回家, 回起点]
+
+  走廊尽头:
+    x: 4.0
+    y: 0.0
+    yaw: 0.0
+    aliases: [走廊末端, 走到底]
+
+  A区:
+    x: 1.5
+    y: 0.0
+    yaw: 0.0
+    aliases: [a区, 一区, A 区]
+
+  B区:
+    x: 2.5
+    y: 0.0
+    yaw: 0.0
+    aliases: [b区, 二区, B 区]
