@@ -16,10 +16,13 @@
 | `record_place.py` | 在 RViz 里点一下，把坐标写进 `semantic_map.yaml` |
 | `eval_nav.py` | 导航批量评测：成功率 / 用时 / 终点误差 / recovery 次数 → CSV |
 | `semantic_map.py` | 语义地图读取（有 PyYAML 用 PyYAML，没有则内置极小解析器） |
-| `test_parse.py` | 解析层单测，23 条断言，**不需要 ROS 也不需要 pyyaml** |
-| `grounding.py` | A2 视觉接地：指令 → 检测框 → 深度反投影 → `map` 坐标 → 导航目标 |
-| `test_grounding.py` | 几何层单测，69 条断言，**不需要 ROS / GPU / 图像** |
-| `run_tests.py` | 统一测试入口：语法检查 + 逐个跑 `test_*.py` + 汇总 |
+| `grounding.py` | A2/A3 视觉接地：指令 → 检测框 → 深度反投影 → `map` 坐标 → 导航目标 |
+| `test_parse.py` | A1 指令解析单测（表驱动，含真实 yaml） |
+| `test_grounding.py` | 几何层：四元数、投影、深度中位数、bbox、落点、CLI |
+| `test_pipeline.py` | 主干链路 `locate_object()`：检测+深度+外参 → 落点（含失败路径） |
+| `test_detector.py` | 检测器契约：stub / 可选依赖降级 / GroundingDINO 适配层（假 processor 离线验证） |
+| `_testkit.py` | 让同一份断言既能被 pytest 收、也能在没有 pytest 的机器上直接跑 |
+| `run_tests.py` | 统一测试入口：语法检查 + pytest（或 standalone）+ 汇总 |
 
 ## 安装（在虚拟机里执行一次）
 
@@ -126,15 +129,38 @@ python3 eval_nav.py --runs 3 --goal 1.5 0.0 0.0 --csv ~/eval_1026.csv
 
 ## 跑测试
 
+一条命令全跑（**自动选 runner**：装了 pytest 用 pytest，没装就逐文件 standalone）：
+
 ```bash
-python3 run_tests.py          # 语法检查 + 全部单测，一条命令
-python3 test_parse.py         # 只测指令解析（23 条断言）
-python3 test_grounding.py     # 只测视觉接地的几何层（69 条断言）
-python3 test_grounding.py -v  # 逐条打印断言
+python3 run_tests.py              # 语法检查 + 全部单测
+python3 run_tests.py --pytest     # CI 里强制 pytest（没装直接报错）
+python3 run_tests.py --standalone # 模拟机器人机：完全不用 pytest
+python3 run_tests.py -v           # 逐条打印
 ```
 
-都不需要 ROS、不需要 pyyaml（缺 pyyaml 时 `semantic_map.py` 自动用内置解析器）。
-输出 `RESULT: PASS` 即通过；改解析/几何逻辑后先跑它，比在机器人上试错快得多。
+单独跑某个文件两种方式都行：
+
+```bash
+python3 test_parse.py            # 零依赖
+python3 -m pytest test_pipeline.py -q
+```
+
+| 文件 | 覆盖什么 |
+|---|---|
+| `test_parse.py` | 地名/别名、相对方位、罗盘、距离写法、多步、失败提示、真实 `semantic_map.yaml` |
+| `test_grounding.py` | 四元数/位姿、投影反投影、深度中位数、bbox、落点、地面求交、CLI dry-run |
+| `test_pipeline.py` | `locate_object()` 端到端：只取框内像素、坏像素过滤、鸭子类型检测器、min_score/min_area/min_depth/max_depth、落点策略、无 ROS 报错 |
+| `test_detector.py` | stub 后端、可选依赖缺失时的 `SystemExit` + pip 提示、`make_detector` 参数过滤、GroundingDINO `detect()` 的 prompt/阈值/target_sizes/空结果 |
+
+都不需要 ROS、不需要 GPU、不需要 pyyaml（缺 pyyaml 时 `semantic_map.py` 自动用内置解析器），
+numpy 只在装了的时候多测一条互操作用例。输出 `RESULT: PASS` 即通过。
+
+**CI**：`.github/workflows/vla_nav-tests.yml` 在 GitHub Actions 上装 `pytest` 后跑
+`python3 run_tests.py --pytest`，任何推送到 PR 都会触发。
+
+> 设计取舍：断言只写一份（普通 `assert` + 模块级 `test_*` 函数），
+> 由 `_testkit.py` 提供 standalone runner。这样机器人机没 pytest 也能跑，
+> 不会出现"脚本里一套断、pytest 里另一套断"的两份真相。
 
 ## A2：视觉接地（指令 → 画面里的物体 → map 坐标）
 
@@ -177,7 +203,7 @@ python3 grounding.py "红箱子"
 # 算完直接发 Nav2 目标，停在物体前 0.8 m
 python3 grounding.py "红箱子" --navigate --standoff 0.8
 
-# 换真模型（需 pip install torch transformers pillow；没 GPU 也能跑，就是慢）
+# 换真模型（见下节 A3；需 pip install torch transformers pillow）
 python3 grounding.py "红箱子" --detector dino --navigate
 ```
 
@@ -186,6 +212,53 @@ python3 grounding.py "红箱子" --detector dino --navigate
 
 > 为什么默认是 `stub`：检测模型要权重、要 GPU、启动几十秒。把几何链先测干净，
 > 模型出问题才能一眼分清是"没检出"还是"算错了"。
+
+## A3：接真检测器（GroundingDINO）
+
+A2 把几何链钉死了（`test_grounding.py` / `test_pipeline.py`），A3 只做两件事：
+**把检测器换成真模型**，以及**让"没装依赖"变成一句能照抄的命令**，而不是 ImportError 栈。
+
+```
+grounding.py
+  ├─ locate_object(depth, K, detections, tf4, robot_xy, standoff)   ← 纯函数主干（A2 起就测）
+  ├─ StubDetector              ← 零依赖，联调/测试用
+  └─ GroundingDinoDetector     ← 可选依赖：torch + transformers + 权重
+```
+
+**装依赖（可选，不装也能跑全部单测）**
+
+```bash
+pip3 install torch transformers pillow     # 有 NVIDIA 卡就装 CUDA 版 torch
+```
+
+**权重来源**：默认从 HuggingFace 拉 `IDEA-Research/grounding-dino-tiny`（~700 MB）。
+
+- 有网：第一次 `--detector dino` 会自动下载并缓存。
+- 离线机器：先在有网的机器上 `huggingface-cli download IDEA-Research/grounding-dino-tiny`，
+  把缓存拷过去并 `export HF_HOME=/path/to/hf-cache`；或者直接把本地权重目录传给 `--model-id`。
+
+**常用参数**
+
+```bash
+python3 grounding.py "红箱子" --detector dino \
+    --model-id IDEA-Research/grounding-dino-tiny \
+    --box-threshold 0.3 --text-threshold 0.25 \
+    --device cpu --navigate --standoff 0.8
+```
+
+| 参数 | 作用 | 调参直觉 |
+|---|---|---|
+| `--box-threshold` | 框置信度下限 | **检不到**就降到 0.2；**乱检**就升到 0.4 |
+| `--text-threshold` | 文本-框匹配下限 | 提示词是长句时略降 |
+| `--device` | `cpu` / `cuda` | 一律自动；显存小可强制 cpu |
+| `--model-id` | 权重 id 或本地目录 | 离线/自定义微调权重走这里 |
+
+**没 GPU 怎么验证没写错**：`test_detector.py` 用假 processor/model 把 `detect()` 的
+适配逻辑（补句点、阈值透传、`target_sizes=[(H, W)]`、空结果 → `[]`）全测了，
+所以「模型装不上」和「代码写错了」是两件事，可以分开排查。
+
+> 已知限制：GroundingDINO 在 CPU 上单帧要几秒，导航闭环里建议
+> ①先停下车再检测；②用 `--standoff` 留足安全距离；③只在需要时激活检测（别每帧都跑）。
 
 ## 可选：接 LLM 处理更口语化的指令
 
@@ -213,6 +286,6 @@ python3 llm_nav.py "去那个堆放货物的地方"
 ## 下一步（阶段 A 的延伸）
 
 1. 给 `semantic_map.yaml` 补更多地点和别名，覆盖你常说的说法
-2. 把 `--detector dino` 在真机上跑通，接上 `--navigate` 做完整闭环
+2. ~~把 `--detector dino` 接上~~（A3 已完成检测器与几何链拼接；剩下的是**在有 GPU 的机器上真跑一次**并记录指标）
 3. 失败回退：目标不可达时切到探索模式（Frontier exploration）
-4. A3：用采集的轨迹训一个小策略，替掉"规则解析 + costmap 规划"
+4. 把「检出 → 算坐标 → 导航」串成一次完整 episode，用 `eval_nav.py` 的口径记录成功率/耗时

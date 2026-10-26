@@ -17,3 +17,6 @@ CATKIN_IGNORE
 *.swp
 log/
 test/
+
+# 本地虚拟环境（测试用，勿提交）
+.venv/

@@ -1,0 +1,3 @@
+# 只有用 pytest 方式跑测试才需要；`python3 test_parse.py` 这类 standalone 方式是零依赖的。
+# 机器人机上没装 pytest 时直接 `python3 run_tests.py --standalone`。
+pytest>=7
