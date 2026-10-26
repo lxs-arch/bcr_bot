@@ -152,7 +152,7 @@ python3 -m pytest test_pipeline.py -q
 | `test_grounding.py` | 四元数/位姿、投影反投影、深度中位数、bbox、落点、地面求交、CLI dry-run |
 | `test_pipeline.py` | `locate_object()` 端到端：只取框内像素、坏像素过滤、鸭子类型检测器、min_score/min_area/min_depth/max_depth、落点策略、无 ROS 报错 |
 | `test_detector.py` | stub 后端、可选依赖缺失时的 `SystemExit` + pip 提示、`make_detector` 参数过滤、GroundingDINO `detect()` 的 prompt/阈值/target_sizes/空结果（PIL 与 ndarray 两种图像形态） |
-| `test_ros_glue.py` | `_image_to_array`（32FC1/16UC1 毫米转米/rgb8/bgr8/未知编码报错）、`_intrinsics_from_info`、`ready()` 门控、`locate()` 端到端（TF + 中位深度 + 落点）、`main()` 的 0/2/3/4/5 退出码与 `--navigate` 接线 |
+| `test_ros_glue.py` | `_image_to_array`（32FC1/16UC1 毫米转米/rgb8/bgr8/未知编码报错）、`_intrinsics_from_info`、订阅 QoS（sensor data / `--qos reliable`）、`ready()` 门控、`locate()` 端到端（TF + 中位深度 + 落点）、`main()` 的 0/2/3/4/5 退出码与 `--navigate` 接线 |
 
 都不需要真 ROS、不需要 GPU、不需要 pyyaml（缺 pyyaml 时 `semantic_map.py` 自动用内置解析器）。
 `numpy` 是可选依赖，但**装上才能跑 4 类 ndarray 用例**（深度图/图像以 ndarray 进场的路径，
@@ -213,6 +213,10 @@ python3 grounding.py "红箱子" --detector dino --navigate
 
 默认话题：`/bcr_bot/kinect_camera/color/image_raw`、`.../depth/image_raw`、
 `.../color/camera_info`，用 `--color-topic / --depth-topic / --info-topic` 改。
+
+订阅默认用 **sensor data QoS（best_effort）**：相机/深度图基本都用 best_effort 发布，
+用默认的 reliable 订阅与发布方不兼容，症状是「一帧都收不到、15 秒后超时退出码 3」。
+个别相机用 reliable 发布时加 `--qos reliable` 退回默认 QoS。
 
 > 为什么默认是 `stub`：检测模型要权重、要 GPU、启动几十秒。把几何链先测干净，
 > 模型出问题才能一眼分清是"没检出"还是"算错了"。

@@ -499,6 +499,7 @@ python3 run_tests.py --standalone # 机器人机：完全不用 pytest
 | 节点一跑就 `ValueError: truth value of an array with more than one element is ambiguous` | `depth_patch` 里写了 `if not depth:`，真节点喂进来的是 ndarray | 判空改成 `len(depth) == 0`；补 `test_locate_object_accepts_numpy_depth` |
 | `--detector dino` 一检测就 `TypeError: 'int' object is not subscriptable` | `target_sizes=[image.size[::-1]]` 只对 PIL 成立，ndarray 的 `.size` 是整数 | 抽 `_image_hw()`：有 `shape` 用 `shape[:2]`，否则才用 `size[::-1]` |
 | 单元测试全绿、真机第一次跑就崩 | 测试里用假 PIL 图像，真节点传 ndarray，两条路径从没交汇 | `test_ros_glue.py` 用假 rclpy 把「消息 → 节点 → main()」整条链在离线跑通；CI 装 numpy |
+| 节点起得来但 15s 后报「没收到相机图像/深度/内参」 | 相机用 best_effort 发布，`create_subscription` 默认 reliable，两者不兼容 | 订阅改用 `qos_profile_sensor_data`（默认），个别 reliable 相机加 `--qos reliable` |
 
 ---
 

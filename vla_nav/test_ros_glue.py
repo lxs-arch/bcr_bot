@@ -84,6 +84,7 @@ class FakeTransformStamped(object):
 
 
 S = 0.7071067811865476                          # sin(45°) = cos(45°)
+SENSOR_QOS = object()                           # 假 rclpy.qos.qos_profile_sensor_data
 # 光学系 → map：绕 y 转 +90°（光学 z 前 → map x 前），再抬高 0.5m 当相机安装高度
 # 注意是绕 y 不是绕 x：绕 x 转 -90° 会把光学 z 映射到 map +y（小车"朝左"）。
 OPTICAL_TO_MAP = FakeTransformStamped((0.0, 0.0, 0.5), (0.0, S, 0.0, S))
@@ -131,7 +132,7 @@ class FakeWorld(object):
     def deliver(self, topic, message, msgtype=None):
         hits = 0
         for node in self.nodes:
-            for mtype, stopic, cb in node.subs:
+            for mtype, stopic, cb, _qos in node.subs:
                 if stopic == topic and (msgtype is None or mtype is msgtype):
                     cb(message)
                     hits += 1
@@ -153,7 +154,7 @@ class FakeNode(object):
         self.destroyed = False
 
     def create_subscription(self, msgtype, topic, callback, qos):
-        self.subs.append((msgtype, topic, callback))
+        self.subs.append((msgtype, topic, callback, qos))
 
     def get_logger(self):
         return self.logger
@@ -188,6 +189,7 @@ def ros_env(goto_result='SUCCEEDED'):
     rclpy.node = types.SimpleNamespace(Node=world.node_class())
     rclpy.time = types.SimpleNamespace(Time=lambda: 'now')
     rclpy.action = types.SimpleNamespace(ActionClient=_fake_action_client)
+    rclpy.qos = types.SimpleNamespace(qos_profile_sensor_data=SENSOR_QOS)
 
     sensor_msgs = types.ModuleType('sensor_msgs')
     sensor_msgs.msg = types.SimpleNamespace(Image=FakeImage, CameraInfo=FakeCameraInfo)
@@ -211,6 +213,7 @@ def ros_env(goto_result='SUCCEEDED'):
                         'geometry_msgs': geometry_msgs, 'tf2_ros': tf2_ros,
                         'nav2_msgs': nav2_msgs, 'llm_nav': llm_nav})
     for name, mod in (('rclpy.node', rclpy.node), ('rclpy.time', rclpy.time),
+                      ('rclpy.qos', rclpy.qos),
                       ('rclpy.action', rclpy.action),
                       ('sensor_msgs.msg', sensor_msgs.msg),
                       ('geometry_msgs.msg', geometry_msgs.msg),
@@ -341,6 +344,26 @@ def test_intrinsics_from_info():
 
 
 # ------------------------------------------------------------------- 节点接线
+@needs_numpy
+def test_node_subscribes_with_sensor_data_qos():
+    """相机/深度是 best_effort 发布的，默认 reliable 订阅会一帧都收不到
+    （症状：15s 超时、退出码 3）。三个订阅都必须用 sensor data QoS。"""
+    with ros_env() as (mod, _world):
+        node = mod.GroundingNode(COLOR_T, DEPTH_T, INFO_T)
+        assert len(node.subs) == 3, node.subs
+        for _msgtype, topic, _cb, qos in node.subs:
+            assert qos is mod.qos_profile_sensor_data, (
+                '%s 订阅的 QoS 应是 qos_profile_sensor_data，实际 %r' % (topic, qos))
+
+
+@needs_numpy
+def test_node_reliable_qos_opt_in():
+    """少数相机用 reliable 发布时可显式退回默认 QoS（队列深度 10）。"""
+    with ros_env() as (mod, _world):
+        node = mod.GroundingNode(COLOR_T, DEPTH_T, INFO_T, qos='reliable')
+        assert [sub[3] for sub in node.subs] == [10, 10, 10], node.subs
+
+
 @needs_numpy
 def test_node_ready_gating():
     with ros_env() as (mod, world):
