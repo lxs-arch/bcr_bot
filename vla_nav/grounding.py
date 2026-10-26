@@ -143,8 +143,11 @@ def depth_patch(depth, box, pad=0):
     `depth` 既可以是「行列表」(`list[list[float]]`)，也可以是 numpy 二维数组——
     两者都支持 `depth[y1:y2]` 与 `row[x1:x2]` 切片，所以这里不必 import numpy。
     空图像 / 完全越界返回 []，交给 `median_depth` 判空。
+
+    判空必须用 `len(depth) == 0`：写 `if not depth:` 时 numpy 数组会抛
+    "truth value of an array is ambiguous"，而真节点喂进来的正好是 ndarray。
     """
-    if not depth:
+    if depth is None or len(depth) == 0:
         return []
     h = len(depth)
     w = len(depth[0]) if h else 0
@@ -268,6 +271,22 @@ class StubDetector(object):
         return list(self.detections)
 
 
+def _image_hw(image):
+    """取图像的 (高, 宽)。
+
+    * numpy 数组（ROS 节点传进来的形态）：`shape` 是 `(H, W[, C])`；
+    * PIL Image：`size` 是 `(W, H)`，要反过来。
+
+    之前直接写 `image.size[::-1]`：PIL 能过，ndarray 上 `image.size` 是整数，
+    `[::-1]` 直接 TypeError——假图像测试掩盖了这个坑。
+    """
+    shape = getattr(image, 'shape', None)
+    if shape is not None and len(shape) >= 2:
+        return int(shape[0]), int(shape[1])
+    w, h = image.size
+    return int(h), int(w)
+
+
 class GroundingDinoDetector(object):
     """真模型后端（可选依赖）。torch + transformers 没装 / 权重没下时给出可执行提示。
 
@@ -330,7 +349,7 @@ class GroundingDinoDetector(object):
             outputs, inputs.input_ids,
             box_threshold=self.box_threshold,
             text_threshold=self.text_threshold,
-            target_sizes=[image.size[::-1]])[0]
+            target_sizes=[_image_hw(image)])[0]
         out = []
         for box, score, label in zip(res['boxes'].tolist(), res['scores'].tolist(),
                                      res.get('labels', [])):

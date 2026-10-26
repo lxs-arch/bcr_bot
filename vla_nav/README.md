@@ -21,6 +21,7 @@
 | `test_grounding.py` | 几何层：四元数、投影、深度中位数、bbox、落点、CLI |
 | `test_pipeline.py` | 主干链路 `locate_object()`：检测+深度+外参 → 落点（含失败路径） |
 | `test_detector.py` | 检测器契约：stub / 可选依赖降级 / GroundingDINO 适配层（假 processor 离线验证） |
+| `test_ros_glue.py` | ROS 粘合层：`_image_to_array`（编码/通道/毫米转米）、内参、`GroundingNode.locate`、`main()` 全流程（假 rclpy，无需真 ROS） |
 | `_testkit.py` | 让同一份断言既能被 pytest 收、也能在没有 pytest 的机器上直接跑 |
 | `run_tests.py` | 统一测试入口：语法检查 + pytest（或 standalone）+ 汇总 |
 
@@ -150,13 +151,16 @@ python3 -m pytest test_pipeline.py -q
 | `test_parse.py` | 地名/别名、相对方位、罗盘、距离写法、多步、失败提示、真实 `semantic_map.yaml` |
 | `test_grounding.py` | 四元数/位姿、投影反投影、深度中位数、bbox、落点、地面求交、CLI dry-run |
 | `test_pipeline.py` | `locate_object()` 端到端：只取框内像素、坏像素过滤、鸭子类型检测器、min_score/min_area/min_depth/max_depth、落点策略、无 ROS 报错 |
-| `test_detector.py` | stub 后端、可选依赖缺失时的 `SystemExit` + pip 提示、`make_detector` 参数过滤、GroundingDINO `detect()` 的 prompt/阈值/target_sizes/空结果 |
+| `test_detector.py` | stub 后端、可选依赖缺失时的 `SystemExit` + pip 提示、`make_detector` 参数过滤、GroundingDINO `detect()` 的 prompt/阈值/target_sizes/空结果（PIL 与 ndarray 两种图像形态） |
+| `test_ros_glue.py` | `_image_to_array`（32FC1/16UC1 毫米转米/rgb8/bgr8/未知编码报错）、`_intrinsics_from_info`、`ready()` 门控、`locate()` 端到端（TF + 中位深度 + 落点）、`main()` 的 0/2/3/4/5 退出码与 `--navigate` 接线 |
 
-都不需要 ROS、不需要 GPU、不需要 pyyaml（缺 pyyaml 时 `semantic_map.py` 自动用内置解析器），
-numpy 只在装了的时候多测一条互操作用例。输出 `RESULT: PASS` 即通过。
+都不需要真 ROS、不需要 GPU、不需要 pyyaml（缺 pyyaml 时 `semantic_map.py` 自动用内置解析器）。
+`numpy` 是可选依赖，但**装上才能跑 4 类 ndarray 用例**（深度图/图像以 ndarray 进场的路径，
+以及 `test_ros_glue.py` 整个文件）——没装时这些用例打印 `SKIP` 而不是失败；CI 里必装，
+否则真机路径的缺陷会静默漏过（历史上就漏过一次，见 C.6）。输出 `RESULT: PASS` 即通过。
 
-**CI**：`.github/workflows/vla_nav-tests.yml` 在 GitHub Actions 上装 `pytest` 后跑
-`python3 run_tests.py --pytest`，任何推送到 PR 都会触发。
+**CI**：`.github/workflows/vla_nav-tests.yml` 在 GitHub Actions 上装 `pytest pyyaml numpy` 后
+分别跑 `--standalone` 与 `--pytest`，任何推送到 PR 都会触发。
 
 > 设计取舍：断言只写一份（普通 `assert` + 模块级 `test_*` 函数），
 > 由 `_testkit.py` 提供 standalone runner。这样机器人机没 pytest 也能跑，

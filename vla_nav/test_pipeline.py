@@ -78,6 +78,23 @@ def test_depth_patch_clamps_and_handles_empty():
     assert G.depth_patch(dep, (10, 10, 10, 10)) != [], '退化框仍取到 1 个像素（+1 语义）'
 
 
+def test_locate_object_accepts_numpy_depth():
+    """ROS 节点喂进来的是 ndarray（_image_to_array 的返回），不是行列表。
+
+    这条用例存在的意义：假图像能过、真节点一跑就崩的 bug（if not ndarray / image.size）
+    只有 numpy 在场时才暴露。
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        print('SKIP numpy 端到端（本机没有 numpy）')
+        return
+    dep = np.full((H, W), 2.0, dtype=np.float32)
+    res = G.locate_object(dep, K, [G.Detection(BOX, 0.9)], IDENTITY_AT_ORIGIN, (0, 0))
+    assert res is not None, 'ndarray 深度图必须能走完 locate_object'
+    _testkit.approx(res['depth'], 2.0, note='ndarray 中位深度')
+
+
 def test_depth_patch_accepts_numpy():
     try:
         import numpy as np
