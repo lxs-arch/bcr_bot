@@ -383,6 +383,7 @@ if HAVE_ROS:
     from sensor_msgs.msg import CameraInfo, Image
     from geometry_msgs.msg import PoseStamped
     from tf2_ros import Buffer, TransformListener
+    from rclpy.qos import qos_profile_sensor_data
 
     def _intrinsics_from_info(msg):
         return {'fx': msg.k[0], 'fy': msg.k[4], 'cx': msg.k[2], 'cy': msg.k[5]}
@@ -404,20 +405,27 @@ if HAVE_ROS:
         """订阅彩色/深度/相机内参 + TF，把"指令里的物体"变成 map 坐标。"""
 
         def __init__(self, color_topic, depth_topic, info_topic,
-                     target_frame='map', standoff=0.8):
+                     target_frame='map', standoff=0.8, qos=None):
+            """qos: None/'sensor' → sensor data QoS（best_effort）；'reliable' → 默认 QoS。
+
+            默认必须是 sensor data：相机/深度图普遍用 best_effort 发布，reliable 订阅
+            与它们不兼容，表现就是「一帧都收不到、15s 后超时」。
+            """
             super().__init__('grounding')
             self.standoff = standoff
             self.target_frame = target_frame
+            self.qos_name = 'reliable' if qos == 'reliable' else 'sensor'
+            self.qos = 10 if self.qos_name == 'reliable' else qos_profile_sensor_data
             self.k = None
             self.color = None
             self.depth = None
             self.tf = Buffer()
             self.listener = TransformListener(self.tf, self)
-            self.create_subscription(CameraInfo, info_topic, self._on_info, 5)
-            self.create_subscription(Image, color_topic, self._on_color, 5)
-            self.create_subscription(Image, depth_topic, self._on_depth, 5)
-            self.get_logger().info('grounding 就绪: color=%s depth=%s info=%s' % (
-                color_topic, depth_topic, info_topic))
+            self.create_subscription(CameraInfo, info_topic, self._on_info, self.qos)
+            self.create_subscription(Image, color_topic, self._on_color, self.qos)
+            self.create_subscription(Image, depth_topic, self._on_depth, self.qos)
+            self.get_logger().info('grounding 就绪: color=%s depth=%s info=%s qos=%s' % (
+                color_topic, depth_topic, info_topic, self.qos_name))
 
         def _on_info(self, msg):
             self.k = _intrinsics_from_info(msg)
@@ -466,6 +474,8 @@ def _parse_args(argv):
     ap.add_argument('--depth-topic', default='/bcr_bot/kinect_camera/depth/image_raw')
     ap.add_argument('--info-topic', default='/bcr_bot/kinect_camera/color/camera_info')
     ap.add_argument('--standoff', type=float, default=0.8, help='距目标保持多少米')
+    ap.add_argument('--qos', default='sensor', choices=['sensor', 'reliable'],
+                    help='订阅 QoS：sensor=best_effort（相机默认），reliable=少数相机用')
     ap.add_argument('--navigate', action='store_true', help='算完直接发 /navigate_to_pose')
     ap.add_argument('--dry-run', action='store_true', help='只做纯几何计算，不需要 ROS')
     ap.add_argument('--box', nargs=4, type=float, metavar=('X1', 'Y1', 'X2', 'Y2'))
@@ -520,7 +530,7 @@ def main(argv=None):
 
     rclpy.init()
     node = GroundingNode(args.color_topic, args.depth_topic, args.info_topic,
-                         standoff=args.standoff)
+                         standoff=args.standoff, qos=args.qos)
     try:
         import time
         t0 = time.time()
