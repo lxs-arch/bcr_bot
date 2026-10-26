@@ -274,5 +274,20 @@ def test_dino_detect_empty_result():
     assert det.detect(_Image(), 'nothing here') == [], '空结果应返回 []'
 
 
+def test_parse_args_stub_box():
+    args = G._parse_args(['红箱子', '--stub-box', '10', '20', '60', '80', '--stub-score', '0.75'])
+    assert args.stub_box == [10.0, 20.0, 60.0, 80.0], args.stub_box
+    _testkit.approx(args.stub_score, 0.75)
+    assert G._parse_args(['红箱子']).stub_box is None, '默认不注入框'
+
+
+def test_stub_detector_from_box():
+    det = G.StubDetector.from_box((10, 20, 60, 80), score=0.75, label='红箱子')
+    (found,) = det.detect(object(), '红箱子')
+    assert found.box == (10.0, 20.0, 60.0, 80.0), found.box
+    _testkit.approx(found.score, 0.75)
+    assert found.label == '红箱子', found.label
+
+
 if __name__ == '__main__':
     sys.exit(_testkit.run(globals()))

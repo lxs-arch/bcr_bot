@@ -453,6 +453,36 @@ def test_main_navigate_failure_exit_code():
 
 
 @needs_numpy
+def test_main_stub_box_injects_detection():
+    """真机上没有权重时，--stub-box 应把固定框喂给 StubDetector，
+    从而在真实深度图/真实 TF 上验证整条几何链（这是 A3 的验收手段）。"""
+    with ros_env() as (mod, world):
+        queue_for_main(world, mod)          # 不 monkeypatch make_detector：走真实 stub 分支
+        rc = mod.main(['红箱子', '--stub-box', '24', '16', '40', '32', '--robot', '0', '0'])
+        assert rc == 0, '有注入框时必须找到目标，实际退出码 %r' % (rc,)
+
+
+@needs_numpy
+def test_main_frame_flag_sets_target_frame():
+    """没建图时 map 帧不存在，--frame odom 让 TF 查询换个上级帧。"""
+    with ros_env() as (mod, world):
+        queue_for_main(world, mod)
+        assert mod.main(['红箱子', '--stub-box', '24', '16', '40', '32',
+                         '--frame', 'odom']) == 0
+        assert world.nodes[0].target_frame == 'odom', world.nodes[0].target_frame
+        assert world.nodes[0].tf.calls == [('odom', 'bcr_bot/kinect_camera_optical_frame')], \
+            world.nodes[0].tf.calls
+
+
+@needs_numpy
+def test_main_stub_box_needs_stub_detector():
+    with ros_env() as (mod, _world):
+        queue_for_main(_world, mod)
+        assert mod.main(['红箱子', '--detector', 'dino', '--stub-box',
+                         '1', '2', '3', '4']) == 2
+
+
+@needs_numpy
 def test_main_missing_prompt():
     with ros_env() as (mod, _world):
         assert mod.main([]) == 2, '没有目标词应返回 2'
