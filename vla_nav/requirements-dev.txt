@@ -1,3 +1,6 @@
 # 只有用 pytest 方式跑测试才需要；`python3 test_parse.py` 这类 standalone 方式是零依赖的。
 # 机器人机上没装 pytest 时直接 `python3 run_tests.py --standalone`。
 pytest>=7
+# numpy 不是业务依赖（几何代码对 ndarray / 行列表都成立），但装上才能跑 test_*.py 里
+# 那几条 numpy 互操作用例；CI 里必须装，否则这些用例会静默 SKIP。
+numpy>=1.24

@@ -465,9 +465,13 @@ python3 run_tests.py --pytest     # CI 用：强制 pytest
 python3 run_tests.py --standalone # 机器人机：完全不用 pytest
 ```
 
-- 覆盖解析 / 语义词典 / 几何投影 / 落点策略 / 检测器契约 / 依赖降级；
-- CI：`.github/workflows/vla_nav-tests.yml`（push / PR 触发，`ubuntu-latest` + `pip install pytest pyyaml`）；
-- numpy 只在装了的时候多测一条互操作用例；pyyaml 缺失时走内置解析器。
+- 覆盖解析 / 语义词典 / 几何投影 / 落点策略 / 检测器契约 / 依赖降级 / ROS 粘合层；
+- 粘合层（消息 → ndarray → 节点 → `main()`）用假 `rclpy`/`sensor_msgs`/`tf2_ros` 在 Mac 上跑，
+  不需要真 ROS，也不需要 GPU；
+- CI：`.github/workflows/vla_nav-tests.yml`（push / PR 触发，`ubuntu-latest` +
+  `pip install pytest pyyaml numpy`，跑 standalone 与 pytest 两个 runner）；
+- `numpy` 装上才跑 ndarray 用例（没装时打印 SKIP）：真节点喂进来的就是 ndarray，
+  所以 CI 必须装，否则这一层等于没测；pyyaml 缺失时走内置解析器。
 
 ### C.5 阶段 A 指标表模板
 
@@ -492,6 +496,9 @@ python3 run_tests.py --standalone # 机器人机：完全不用 pytest
 | 物体在画面里但坐标乱飞 | 只用 yaw 近似相机外参，把光学系的"下"当成了 map 的 +y | TF 必须带完整四元数；`test_pipeline.py::test_optical_rotation_maps_height` 钉住这一点 |
 | 目标点撞在物体上 | 直接把物体坐标当导航目标 | 沿「机器人→物体」连线退 `--standoff` 米 |
 | CPU 上 dino 每帧好几秒 | GroundingDINO 是 ViT 检测器 | 停车再检测、`--standoff` 留余量、只在需要时触发 |
+| 节点一跑就 `ValueError: truth value of an array with more than one element is ambiguous` | `depth_patch` 里写了 `if not depth:`，真节点喂进来的是 ndarray | 判空改成 `len(depth) == 0`；补 `test_locate_object_accepts_numpy_depth` |
+| `--detector dino` 一检测就 `TypeError: 'int' object is not subscriptable` | `target_sizes=[image.size[::-1]]` 只对 PIL 成立，ndarray 的 `.size` 是整数 | 抽 `_image_hw()`：有 `shape` 用 `shape[:2]`，否则才用 `size[::-1]` |
+| 单元测试全绿、真机第一次跑就崩 | 测试里用假 PIL 图像，真节点传 ndarray，两条路径从没交汇 | `test_ros_glue.py` 用假 rclpy 把「消息 → 节点 → main()」整条链在离线跑通；CI 装 numpy |
 
 ---
 

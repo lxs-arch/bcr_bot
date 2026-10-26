@@ -247,6 +247,21 @@ def test_dino_detect_prompt_and_thresholds():
         det.processor.calls[-1]['text'],)
 
 
+def test_dino_detect_accepts_numpy_image():
+    """节点传的是 ndarray（没有 .size 元组），target_sizes 必须从 shape 算。"""
+    try:
+        import numpy as np
+    except ImportError:
+        print('SKIP numpy 图像（本机没有 numpy）')
+        return
+    det = _bare_detector()
+    img = np.zeros((480, 640, 3), dtype=np.uint8)
+    out = det.detect(img, '红箱子')
+    assert len(out) == 1, 'ndarray 图像应能检出'
+    assert det.processor.post['target_sizes'] == [(480, 640)], (
+        'target_sizes 应为 [(高, 宽)]，实际 %r' % (det.processor.post['target_sizes'],))
+
+
 def test_dino_detect_empty_result():
     """模型什么都没检出 → 空列表（上层据此判"没找到"），不能崩。"""
     det = _bare_detector()
