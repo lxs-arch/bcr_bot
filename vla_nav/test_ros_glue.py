@@ -273,9 +273,11 @@ def needs_numpy(fn):
 
 
 # ---------------------------------------------------------- 默认 topic（与 CLI 一致）
-COLOR_T = '/bcr_bot/kinect_camera/color/image_raw'
-DEPTH_T = '/bcr_bot/kinect_camera/depth/image_raw'
-INFO_T = '/bcr_bot/kinect_camera/color/camera_info'
+# 必须等于 grounding.py 的 CLI 默认值：假世界按 topic 名投递，若这里和默认值漂了，
+# main() 用例不会报错，只会安静地等满 15s 再超时（真机上就是这么踩的）。
+COLOR_T = '/kinect_camera_sensor/color'
+DEPTH_T = '/kinect_camera_sensor/depth'
+INFO_T = '/kinect_camera_sensor/camera_info'
 
 
 def make_node(mod, standoff=0.8):
@@ -296,6 +298,20 @@ def queue_for_main(world, mod):
     world.spin_scripts = [(INFO_T, FakeCameraInfo()),
                           (COLOR_T, color_image()),
                           (DEPTH_T, depth_image(dtype='uint16'))]
+
+
+def test_fake_world_topics_match_cli_defaults():
+    """防漂移：假世界投递的话题名必须和 CLI 默认值完全一致。
+
+    MuJoCo 是 /kinect_camera_sensor/*，Gazebo 是 /bcr_bot/kinect_camera/*。
+    只要两边不一致，main() 的用例就会 15s 超时（而不是断言失败），很难看出根因。
+    """
+    args = G._parse_args(['红箱子'])
+    assert (COLOR_T, DEPTH_T, INFO_T) == (
+        args.color_topic, args.depth_topic, args.info_topic), \
+        '假世界话题 %r != CLI 默认 %r' % (
+            (COLOR_T, DEPTH_T, INFO_T),
+            (args.color_topic, args.depth_topic, args.info_topic))
 
 
 # ------------------------------------------------------- _image_to_array / 内参
@@ -450,6 +466,36 @@ def test_main_navigate_failure_exit_code():
         mod.make_detector = lambda name, **kw: standard_detector(mod)
         queue_for_main(world, mod)
         assert mod.main(['红箱子', '--navigate']) == 5, '导航失败应返回 5'
+
+
+@needs_numpy
+def test_main_stub_box_injects_detection():
+    """真机上没有权重时，--stub-box 应把固定框喂给 StubDetector，
+    从而在真实深度图/真实 TF 上验证整条几何链（这是 A3 的验收手段）。"""
+    with ros_env() as (mod, world):
+        queue_for_main(world, mod)          # 不 monkeypatch make_detector：走真实 stub 分支
+        rc = mod.main(['红箱子', '--stub-box', '24', '16', '40', '32', '--robot', '0', '0'])
+        assert rc == 0, '有注入框时必须找到目标，实际退出码 %r' % (rc,)
+
+
+@needs_numpy
+def test_main_frame_flag_sets_target_frame():
+    """没建图时 map 帧不存在，--frame odom 让 TF 查询换个上级帧。"""
+    with ros_env() as (mod, world):
+        queue_for_main(world, mod)
+        assert mod.main(['红箱子', '--stub-box', '24', '16', '40', '32',
+                         '--frame', 'odom']) == 0
+        assert world.nodes[0].target_frame == 'odom', world.nodes[0].target_frame
+        assert world.nodes[0].tf.calls == [('odom', 'bcr_bot/kinect_camera_optical_frame')], \
+            world.nodes[0].tf.calls
+
+
+@needs_numpy
+def test_main_stub_box_needs_stub_detector():
+    with ros_env() as (mod, _world):
+        queue_for_main(_world, mod)
+        assert mod.main(['红箱子', '--detector', 'dino', '--stub-box',
+                         '1', '2', '3', '4']) == 2
 
 
 @needs_numpy

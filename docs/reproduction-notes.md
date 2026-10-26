@@ -454,7 +454,23 @@ python3 grounding.py --dry-run --box 300 200 380 300 --depth 2.0 \
 
 # A3：真检测器（可选依赖 torch/transformers/pillow + 权重）
 python3 grounding.py "红箱子" --detector dino --box-threshold 0.3 --navigate --standoff 0.8
+
+# A3 降级验收：没有权重也能在真机上验几何链（真实彩色图 + 真实深度 + 真实 TF）
+# 前提：ros2 launch bcr_bot mujoco.launch.py 已起；没起 SLAM 所以 --frame odom
+python3 grounding.py "红箱子" --detector stub \
+    --stub-box 300 200 380 300 --frame odom
 ```
+
+实测（Ubuntu 24.04 + Jazzy + MuJoCo `bcr_bot_small_warehouse`，2026-10-26）：
+
+```
+[INFO] [grounding]: grounding 就绪: color=/kinect_camera_sensor/color
+       depth=/kinect_camera_sensor/depth info=/kinect_camera_sensor/camera_info qos=sensor
+[FOUND] 'red_box' score=0.900 depth=6.45m object=(6.90, -0.23, 0.11) -> goal=(6.10, -0.21, yaw=-0.03)
+```
+
+也就是说：**真机相机帧 → 解码 → 内参 → 框内中位深度 6.45m → 反投影 → TF(odom)
+→ 落点 / 退 0.8m 的导航目标**整链在真实数据上走通了（唯一的假的是框本身）。
 
 ### C.4 测试（本仓库的「先写测试再合并」约定）
 
@@ -481,7 +497,7 @@ python3 run_tests.py --standalone # 机器人机：完全不用 pytest
 |---|---|---|---|---|---|---|---|---|
 | `去A区` | 地名 | n/a | ✅ | 0 | 12.4 | 0.08 | — | 基线 |
 | `A区左边1米` | 相对方位 | n/a | ✅ | 0 | 13.1 | 0.11 | — | yaw 决定"左" |
-| `红箱子` | 视觉接地(stub) | ✅ | — | — | — | — | — | 只验证链路 |
+| `红箱子` | 视觉接地(stub) | ✅ | — | — | 8.2 | — | — | 真机 MuJoCo 验链路：depth=6.45m → object=(6.90,-0.23,0.11) → goal=(6.10,-0.21) |
 | `红箱子` | 视觉接地(dino) | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | **待 GPU 机器填** |
 
 失败环节分类建议：`parse`（没认出）/ `detect`（没检出/误检）/ `depth`（深度缺失）/
@@ -499,6 +515,9 @@ python3 run_tests.py --standalone # 机器人机：完全不用 pytest
 | 节点一跑就 `ValueError: truth value of an array with more than one element is ambiguous` | `depth_patch` 里写了 `if not depth:`，真节点喂进来的是 ndarray | 判空改成 `len(depth) == 0`；补 `test_locate_object_accepts_numpy_depth` |
 | `--detector dino` 一检测就 `TypeError: 'int' object is not subscriptable` | `target_sizes=[image.size[::-1]]` 只对 PIL 成立，ndarray 的 `.size` 是整数 | 抽 `_image_hw()`：有 `shape` 用 `shape[:2]`，否则才用 `size[::-1]` |
 | 单元测试全绿、真机第一次跑就崩 | 测试里用假 PIL 图像，真节点传 ndarray，两条路径从没交汇 | `test_ros_glue.py` 用假 rclpy 把「消息 → 节点 → main()」整条链在离线跑通；CI 装 numpy |
+| `grounding.py` 起来就绪、但 15s 后报没收到图像 | MuJoCo 仿真发的是 `/kinect_camera_sensor/{color,depth,camera_info}`，Gazebo 才是 `/bcr_bot/kinect_camera/...`；默认值一开始写的是 Gazebo 那套 | 默认值改成 MuJoCo 那套，Gazebo 用 `--color-topic/--depth-topic/--info-topic` 覆盖；先 `ros2 topic list` 看一眼 |
+| 从 Mac 打包带过去的测试全绿，VM 上 `run_tests.py` 却报 `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa3` | macOS 的 `tar` 会把扩展属性写成 `._*` 伴生文件，这些文件也以 `.py` 结尾，被语法检查当源码读 | 打包用 `COPYFILE_DISABLE=1 tar czf …`，或在目标机 `rm -f */._*` |
+| VM 里 `git clone`/`curl https://github.com` 一律超时 | 机器只能连国内站点（百度/gitee 通，GitHub/CDN/各类 gh 代理都不通）；`gitclone.com` 对本仓库返回 504 | 在 Mac 上打包，用 `ssh -R` 隧道（localhost.run）起一个公网 URL，VM 里 `curl` 下载；或走共享文件夹 |
 | 节点起得来但 15s 后报「没收到相机图像/深度/内参」 | 相机用 best_effort 发布，`create_subscription` 默认 reliable，两者不兼容 | 订阅改用 `qos_profile_sensor_data`（默认），个别 reliable 相机加 `--qos reliable` |
 
 ---

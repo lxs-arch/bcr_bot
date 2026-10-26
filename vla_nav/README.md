@@ -152,7 +152,7 @@ python3 -m pytest test_pipeline.py -q
 | `test_grounding.py` | 四元数/位姿、投影反投影、深度中位数、bbox、落点、地面求交、CLI dry-run |
 | `test_pipeline.py` | `locate_object()` 端到端：只取框内像素、坏像素过滤、鸭子类型检测器、min_score/min_area/min_depth/max_depth、落点策略、无 ROS 报错 |
 | `test_detector.py` | stub 后端、可选依赖缺失时的 `SystemExit` + pip 提示、`make_detector` 参数过滤、GroundingDINO `detect()` 的 prompt/阈值/target_sizes/空结果（PIL 与 ndarray 两种图像形态） |
-| `test_ros_glue.py` | `_image_to_array`（32FC1/16UC1 毫米转米/rgb8/bgr8/未知编码报错）、`_intrinsics_from_info`、订阅 QoS（sensor data / `--qos reliable`）、`ready()` 门控、`locate()` 端到端（TF + 中位深度 + 落点）、`main()` 的 0/2/3/4/5 退出码与 `--navigate` 接线 |
+| `test_ros_glue.py` | `--stub-box` 注入框走完 main、`--frame` 换目标帧、`_image_to_array`（32FC1/16UC1 毫米转米/rgb8/bgr8/未知编码报错）、`_intrinsics_from_info`、订阅 QoS（sensor data / `--qos reliable`）、`ready()` 门控、`locate()` 端到端（TF + 中位深度 + 落点）、`main()` 的 0/2/3/4/5 退出码与 `--navigate` 接线 |
 
 都不需要真 ROS、不需要 GPU、不需要 pyyaml（缺 pyyaml 时 `semantic_map.py` 自动用内置解析器）。
 `numpy` 是可选依赖，但**装上才能跑 4 类 ndarray 用例**（深度图/图像以 ndarray 进场的路径，
@@ -211,8 +211,19 @@ python3 grounding.py "红箱子" --navigate --standoff 0.8
 python3 grounding.py "红箱子" --detector dino --navigate
 ```
 
-默认话题：`/bcr_bot/kinect_camera/color/image_raw`、`.../depth/image_raw`、
-`.../color/camera_info`，用 `--color-topic / --depth-topic / --info-topic` 改。
+默认话题对着 **MuJoCo 仿真**（真机实测过）：`/kinect_camera_sensor/color`、
+`/kinect_camera_sensor/depth`、`/kinect_camera_sensor/camera_info`。
+Gazebo 分支用的是另一套，用参数覆盖：
+
+```bash
+# Gazebo（Harmonic/Fortress）那套话题名
+--color-topic /bcr_bot/kinect_camera/color/image_raw \
+--depth-topic /bcr_bot/kinect_camera/depth/image_raw \
+--info-topic  /bcr_bot/kinect_camera/color/camera_info
+```
+
+先 `ros2 topic list | grep -iE "image|camera"` 确认；MuJoCo 里还有
+`/bcr_bot/stereo_camera/{left,right}/{image_raw,depth,camera_info}` 可用。
 
 订阅默认用 **sensor data QoS（best_effort）**：相机/深度图基本都用 best_effort 发布，
 用默认的 reliable 订阅与发布方不兼容，症状是「一帧都收不到、15 秒后超时退出码 3」。
@@ -220,6 +231,24 @@ python3 grounding.py "红箱子" --detector dino --navigate
 
 > 为什么默认是 `stub`：检测模型要权重、要 GPU、启动几十秒。把几何链先测干净，
 > 模型出问题才能一眼分清是"没检出"还是"算错了"。
+
+**没权重也想在真机上验几何链**：`--stub-box X1 Y1 X2 Y2 [--stub-score 0.9]`
+把固定框喂给 `StubDetector`，于是走的是**真实彩色图 + 真实深度图 + 真实 TF**
+的完整 `locate_object`，只有"框从哪来"这一环是假的。没建图（`map` 帧不存在）时
+再加 `--frame odom`。
+
+```bash
+# 仿真里已经有相机话题、但没起 SLAM 时，验"深度 → 相机系 → odom 落点"
+python3 grounding.py "红箱子" --detector stub \
+    --stub-box 300 200 380 300 --frame odom
+```
+
+在真机（Jazzy + MuJoCo `bcr_bot_small_warehouse`）上跑通的输出：
+
+```
+[INFO] [grounding]: grounding 就绪: color=/kinect_camera_sensor/color … qos=sensor
+[FOUND] 'red_box' score=0.900 depth=6.45m object=(6.90, -0.23, 0.11) -> goal=(6.10, -0.21, yaw=-0.03)
+```
 
 ## A3：接真检测器（GroundingDINO）
 
@@ -260,6 +289,8 @@ python3 grounding.py "红箱子" --detector dino \
 | `--text-threshold` | 文本-框匹配下限 | 提示词是长句时略降 |
 | `--device` | `cpu` / `cuda` | 一律自动；显存小可强制 cpu |
 | `--model-id` | 权重 id 或本地目录 | 离线/自定义微调权重走这里 |
+| `--stub-box` / `--stub-score` | stub 后端注入一个像素框 | 真机上先验几何链，别等权重 |
+| `--frame` | 目标坐标系，默认 `map` | 没建图时用 `odom` |
 
 **没 GPU 怎么验证没写错**：`test_detector.py` 用假 processor/model 把 `detect()` 的
 适配逻辑（补句点、阈值透传、`target_sizes=[(H, W)]`、空结果 → `[]`）全测了，
